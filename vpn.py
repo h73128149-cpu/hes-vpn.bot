@@ -19,9 +19,9 @@ from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo
 
 # ───────────────────────── تنظیمات ─────────────────────────
 
-TOKEN = os.getenv("BOT_TOKEN", "").strip()
+TOKEN = os.getenv("8844989420:AAH6DZcB-_-X9nQ7pKW5TVa5rPoZZm5rULA", "").strip()
 if not TOKEN:
-    raise RuntimeError("8844989420:AAH6DZcB-_-X9nQ7pKW5TVa5rPoZZm5rULA")
+    raise RuntimeError("متغیر محیطی BOT_TOKEN تنظیم نشده است.")
 
 CARD_NUMBER = os.getenv("CARD_NUMBER", "6219861837027282")
 CARD_HOLDER = os.getenv("CARD_HOLDER", "عابدینی")
@@ -1010,4 +1010,4 @@ if __name__ == "__main__":
             bot.infinity_polling(skip_pending=True, timeout=30, long_polling_timeout=30)
         except Exception as e:
             logger.error(f"Polling error: {e}")
-            time.sleep(5)
+            time.sleep(5)+
