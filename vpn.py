@@ -1010,4 +1010,4 @@ if __name__ == "__main__":
             bot.infinity_polling(skip_pending=True, timeout=30, long_polling_timeout=30)
         except Exception as e:
             logger.error(f"Polling error: {e}")
-            time.sleep(5)+
+            time.sleep(5)
