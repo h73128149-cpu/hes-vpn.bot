@@ -21,7 +21,7 @@ from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo
 
 TOKEN = os.getenv("BOT_TOKEN", "").strip()
 if not TOKEN:
-    raise RuntimeError("8844989420:AAHesRVykZ10Ra2AIvzhn7iZkwC4Kzd1bP0")
+    raise RuntimeError("8844989420:AAH6DZcB-_-X9nQ7pKW5TVa5rPoZZm5rULA")
 
 CARD_NUMBER = os.getenv("CARD_NUMBER", "6219861837027282")
 CARD_HOLDER = os.getenv("CARD_HOLDER", "عابدینی")
