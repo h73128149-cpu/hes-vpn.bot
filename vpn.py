@@ -18,7 +18,7 @@ from datetime import datetime, timedelta
 from contextlib import contextmanager
 
 import telebot
-from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo
+from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo, ReplyKeyboardMarkup, KeyboardButton
 
 # ───────────────────────── تنظیمات ─────────────────────────
 
@@ -372,6 +372,10 @@ def send_main_menu(chat_id, user_name, user_id):
         "برای خرید، فروشگاه آنلاین را باز کنید؛ بعد از انتخاب پلن به همین ربات برمی‌گردید.",
         reply_markup=markup,
     )
+    # جایگزینی کیبورد دائمی فروشگاه با یک دکمهٔ ساده برای اجرای /start
+    start_kb = ReplyKeyboardMarkup(resize_keyboard=True, is_persistent=True)
+    start_kb.add(KeyboardButton("/start"))
+    bot.send_message(chat_id, "برای باز کردن دوبارهٔ منوی ربات:", reply_markup=start_kb)
 
 
 def send_plan_checkout(chat_id, user_id, price):
@@ -999,6 +1003,20 @@ def handle_callbacks(call):
         else:
             audit_event(user_id, "wallet_topup_approved", f"payment={payment_id};user={payment['user_id']};amount={payment['amount']}")
         bot.send_message(payment["user_id"], "✅ " + result_text)
+        # رسید تأیید پرداخت برای مدیر؛ هم خرید پلن و هم شارژ کیف پول
+        try:
+            payment_label = "شارژ کیف پول" if payment["kind"] == "wallet" else f"خرید پلن {payment['kind'].removeprefix('plan:')}"
+            bot.send_message(
+                ADMIN_CHAT_ID,
+                f"✅ تأیید پرداخت با موفقیت ثبت شد.\\n"
+                f"شناسه پرداخت: {payment_id}\\n"
+                f"کاربر: {payment['user_id']}\\n"
+                f"نوع: {payment_label}\\n"
+                f"مبلغ: {payment['amount']:,} تومان\\n"
+                f"زمان: {now_text()}"
+            )
+        except Exception:
+            logger.exception("Could not send admin payment approval confirmation")
         if payment["kind"] != "wallet":
             notify_admin_order(order_id, payment["user_id"], payment["amount"], plan_name)
         else:
