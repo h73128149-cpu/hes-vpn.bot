@@ -18,7 +18,7 @@ from datetime import datetime, timedelta
 from contextlib import contextmanager
 
 import telebot
-from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo, ReplyKeyboardMarkup, KeyboardButton
+from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo
 
 # ───────────────────────── تنظیمات ─────────────────────────
 
@@ -41,7 +41,8 @@ if ADMIN_CHAT_ID <= 0:
 
 CARD_NUMBER = os.getenv("CARD_NUMBER", "").strip()
 CARD_HOLDER = os.getenv("CARD_HOLDER", "مدیر فروشگاه").strip()
-WEB_APP_URL = os.getenv("WEB_APP_URL", "https://h73128149-cpu.github.io/Mini_vpn/").strip()
+WEB_APP_URL = os.getenv("WEB_APP_URL", "https://h73128149-cpu.github.io/Mini_vpn/")
+BOT_USERNAME = os.getenv("BOT_USERNAME", "Hes_vpn").strip().lstrip("@")
 REQUIRED_CHANNEL = os.getenv("REQUIRED_CHANNEL", "@Hesvpnn")
 
 DEFAULT_CONFIG = os.getenv("DEFAULT_CONFIG", "")
@@ -125,7 +126,8 @@ def init_db():
                 created_at TEXT NOT NULL,
                 paid_from_wallet INTEGER NOT NULL DEFAULT 0,
                 config_sent INTEGER NOT NULL DEFAULT 0,
-                coupon_code TEXT
+                coupon_code TEXT,
+                status_link TEXT
             )
         """)
         conn.execute("""CREATE TABLE IF NOT EXISTS coupons (
@@ -152,7 +154,7 @@ def init_db():
         )""")
         # Migration for existing databases created by older versions.
         for table, column, definition in [
-            ('payments', 'coupon_code', 'TEXT'), ('orders', 'coupon_code', 'TEXT'), ('users', 'loyalty_points', 'INTEGER NOT NULL DEFAULT 0')
+            ('payments', 'coupon_code', 'TEXT'), ('orders', 'coupon_code', 'TEXT'), ('orders', 'status_link', 'TEXT'), ('users', 'loyalty_points', 'INTEGER NOT NULL DEFAULT 0')
         ]:
             cols = [r['name'] for r in conn.execute(f'PRAGMA table_info({table})')]
             if column not in cols:
@@ -340,15 +342,10 @@ def send_membership_prompt(chat_id):
 # ───────────────────────── منوها ─────────────────────────
 
 def send_main_menu(chat_id, user_name, user_id):
-    # sendData در Telegram Web App به‌صورت مطمئن از دکمهٔ Web App در Reply Keyboard
-    # به ربات برمی‌گردد؛ به همین دلیل لانچر جداگانه و دائمی نمایش داده می‌شود.
-    webapp_keyboard = ReplyKeyboardMarkup(resize_keyboard=True, is_persistent=True)
-    webapp_keyboard.add(KeyboardButton("🚀 باز کردن فروشگاه HesVPN", web_app=WebAppInfo(url=WEB_APP_URL)))
-    bot.send_message(chat_id, "برای باز کردن فروشگاه گرافیکی، دکمهٔ زیر را بزنید:", reply_markup=webapp_keyboard)
-
+    # فروشگاه از دکمهٔ داخل پیام ربات باز می‌شود؛ کیبورد Web App دائمی حذف شده است.
     markup = InlineKeyboardMarkup(row_width=2)
     markup.add(
-        InlineKeyboardButton("🚀 مینی‌اپ فروشگاه", web_app=WebAppInfo(url=WEB_APP_URL)),
+        InlineKeyboardButton("🛍️ فروشگاه آنلاین HesVPN", web_app=WebAppInfo(url=WEB_APP_URL)),
         InlineKeyboardButton("🛒 خرید سریع", callback_data="shop"),
     )
     markup.add(
@@ -369,13 +366,58 @@ def send_main_menu(chat_id, user_name, user_id):
     )
     if is_admin(user_id):
         markup.add(InlineKeyboardButton("⚙️ پنل مدیریت", callback_data="admin"))
-
     bot.send_message(
         chat_id,
-        f"سلام {user_name} عزیز 👋\nبه ربات فروشگاه خوش آمدید.\n"
-        "لطفاً گزینهٔ موردنظر را انتخاب کنید:",
+        f"سلام {user_name} عزیز 👋\nبه فروشگاه HesVPN خوش آمدید.\n"
+        "برای خرید، فروشگاه آنلاین را باز کنید؛ بعد از انتخاب پلن به همین ربات برمی‌گردید.",
         reply_markup=markup,
     )
+
+
+def send_plan_checkout(chat_id, user_id, price):
+    """Validate the price server-side and continue the existing bot checkout."""
+    plan = PLANS.get(int(price))
+    if not plan:
+        bot.send_message(chat_id, "❌ این پلن در فروشگاه وجود ندارد.")
+        return
+    payable, coupon_code, percent = coupon_discount(user_id, int(price))
+    with db() as conn:
+        row = conn.execute("SELECT wallet FROM users WHERE user_id=?", (user_id,)).fetchone()
+    wallet = int(row["wallet"]) if row else 0
+    discount_line = f"\n🎟️ تخفیف اعمال‌شده: {percent}٪" if coupon_code else ""
+    if wallet >= payable:
+        user_orders[user_id] = {"type": "wallet_purchase", "price": payable,
+                                "original_price": int(price), "plan_name": plan["name"],
+                                "coupon_code": coupon_code}
+        kb = InlineKeyboardMarkup(row_width=2)
+        kb.add(InlineKeyboardButton("✅ تأیید خرید با کیف پول", callback_data="confirm_buy"))
+        kb.add(InlineKeyboardButton("💳 پرداخت کارت‌به‌کارت", callback_data=f"card_{price}"))
+    else:
+        kb = InlineKeyboardMarkup(row_width=2)
+        kb.add(InlineKeyboardButton("💳 کارت‌به‌کارت", callback_data=f"card_{price}"))
+        kb.add(InlineKeyboardButton("➕ شارژ کیف پول", callback_data="wallet"))
+    kb.add(InlineKeyboardButton("🛒 انتخاب پلن دیگر", callback_data="shop"), InlineKeyboardButton("🏠 منوی اصلی", callback_data="home"))
+    msg = f"🛒 پلن انتخاب‌شده: {plan['name']}\n💰 مبلغ قابل پرداخت: {payable:,} تومان{discount_line}\n💳 موجودی کیف پول: {wallet:,} تومان"
+    if wallet < payable:
+        msg += f"\n❌ کسری موجودی: {payable-wallet:,} تومان"
+    msg += "\n\nروش پرداخت را انتخاب کنید:"
+    bot.send_message(chat_id, msg, reply_markup=kb)
+
+
+def send_account_info(chat_id, user_id):
+    with db() as conn:
+        row = conn.execute("SELECT wallet, expire_date FROM users WHERE user_id=?", (user_id,)).fetchone()
+        order = conn.execute("SELECT status_link, plan_name, created_at FROM orders WHERE user_id=? AND status_link IS NOT NULL AND status_link != '' ORDER BY id DESC LIMIT 1", (user_id,)).fetchone()
+    wallet = int(row["wallet"]) if row else 0
+    exp = row["expire_date"] if row and row["expire_date"] else "در ربات ثبت نشده"
+    kb = InlineKeyboardMarkup()
+    if order and order["status_link"]:
+        kb.add(InlineKeyboardButton("📊 مشاهده حجم و تاریخ سرویس", url=order["status_link"]))
+        body = f"\n\n📦 سرویس: {order['plan_name']}\nبرای دیدن حجم و تاریخ مصرف، دکمهٔ زیر را بزنید."
+    else:
+        body = "\n\nهنوز لینک وضعیت سرویس برای حساب شما ثبت نشده است. پس از ارسال کانفیگ، مدیر لینک وضعیت را ثبت می‌کند."
+    kb.add(InlineKeyboardButton("🔙 منوی اصلی", callback_data="home"))
+    bot.send_message(chat_id, f"👤 حساب من\n🆔 شناسه: {user_id}\n💳 موجودی کیف پول: {wallet:,} تومان\n📅 تاریخ انقضای ثبت‌شده در ربات: {exp}{body}", reply_markup=kb)
 
 
 @bot.message_handler(commands=["start"])
@@ -393,6 +435,38 @@ def send_welcome(message):
         ).fetchone() is not None
 
     ensure_user(message.from_user)
+
+    # Deep links from the mini shop return the selected action to this bot.
+    parts = (message.text or "").split(maxsplit=1)
+    start_payload = parts[1].strip() if len(parts) == 2 else ""
+    if start_payload.startswith("buy_"):
+        try:
+            price = int(start_payload[4:])
+        except ValueError:
+            price = 0
+        if price in PLANS:
+            send_plan_checkout(message.chat.id, user_id, price)
+            return
+        bot.send_message(message.chat.id, "این پلن معتبر نیست؛ از فروشگاه دوباره انتخاب کنید.")
+        return
+    if start_payload in ("account", "wallet", "support", "shop"):
+        if start_payload == "account":
+            send_account_info(message.chat.id, user_id)
+        elif start_payload == "wallet":
+            with db() as conn:
+                row = conn.execute("SELECT wallet FROM users WHERE user_id=?", (user_id,)).fetchone()
+            user_orders[user_id] = {"type": "awaiting_charge_amount"}
+            bot.send_message(message.chat.id, f"💳 موجودی کیف پول: {int(row['wallet']) if row else 0:,} تومان\n\nمبلغ شارژ را با عدد انگلیسی ارسال کنید:", reply_markup=back_button())
+        elif start_payload == "support":
+            user_orders[user_id] = {"type": "awaiting_support_msg"}
+            bot.send_message(message.chat.id, "✉️ پیام یا مشکل خود را در یک پیام ارسال کنید:", reply_markup=back_button())
+        else:
+            kb = InlineKeyboardMarkup(row_width=2)
+            for price, plan in PLANS.items():
+                kb.add(InlineKeyboardButton(plan["label"], callback_data=f"p_{price}"))
+            kb.add(InlineKeyboardButton("🏠 منوی اصلی", callback_data="home"))
+            bot.send_message(message.chat.id, "🛒 پلن موردنظر را انتخاب کنید:", reply_markup=kb)
+        return
 
     if not existed:
         referred_by = None
@@ -447,47 +521,9 @@ def handle_miniapp_data(message):
         except (TypeError, ValueError):
             bot.send_message(message.chat.id, "❌ قیمت پلن نامعتبر است.")
             return
-        plan = PLANS.get(price)
-        if not plan:
-            bot.send_message(message.chat.id, "❌ این پلن در فروشگاه وجود ندارد.")
-            return
-        payable, coupon_code, percent = coupon_discount(user_id, price)
-        with db() as conn:
-            row = conn.execute("SELECT wallet FROM users WHERE user_id = ?", (user_id,)).fetchone()
-        wallet = int(row["wallet"]) if row else 0
-        discount_line = f"\n🎟️ تخفیف اعمال‌شده: {percent}٪" if coupon_code else ""
-        if wallet >= payable:
-            user_orders[user_id] = {"type": "wallet_purchase", "price": payable,
-                                    "original_price": price, "plan_name": plan["name"],
-                                    "coupon_code": coupon_code}
-            kb = InlineKeyboardMarkup(row_width=2)
-            kb.add(InlineKeyboardButton("✅ تأیید خرید با کیف پول", callback_data="confirm_buy"))
-            kb.add(InlineKeyboardButton("💳 پرداخت کارت‌به‌کارت", callback_data=f"card_{price}"))
-            kb.add(InlineKeyboardButton("🛒 انتخاب پلن دیگر", callback_data="shop"),
-                   InlineKeyboardButton("🏠 منوی اصلی", callback_data="home"))
-            bot.send_message(message.chat.id,
-                f"🛒 پلن انتخاب‌شده: {plan['name']}\n💰 مبلغ قابل پرداخت: {payable:,} تومان"
-                f"{discount_line}\n💳 موجودی کیف پول: {wallet:,} تومان\n\nروش پرداخت را انتخاب کنید:",
-                reply_markup=kb)
-        else:
-            kb = InlineKeyboardMarkup(row_width=2)
-            kb.add(InlineKeyboardButton("💳 کارت‌به‌کارت", callback_data=f"card_{price}"))
-            kb.add(InlineKeyboardButton("➕ شارژ کیف پول", callback_data="wallet"))
-            kb.add(InlineKeyboardButton("🛒 انتخاب پلن دیگر", callback_data="shop"),
-                   InlineKeyboardButton("🏠 منوی اصلی", callback_data="home"))
-            bot.send_message(message.chat.id,
-                f"🛒 پلن انتخاب‌شده: {plan['name']}\n💰 مبلغ قابل پرداخت: {payable:,} تومان"
-                f"{discount_line}\n💳 موجودی کیف پول: {wallet:,} تومان\n"
-                f"❌ کسری موجودی: {payable-wallet:,} تومان\n\nروش پرداخت را انتخاب کنید:",
-                reply_markup=kb)
+        send_plan_checkout(message.chat.id, user_id, price)
     elif action == "my_account":
-        with db() as conn:
-            row = conn.execute("SELECT wallet, expire_date FROM users WHERE user_id = ?", (user_id,)).fetchone()
-        wallet = int(row["wallet"]) if row else 0
-        exp = row["expire_date"] if row and row["expire_date"] else "فعال نیست"
-        bot.send_message(message.chat.id,
-            f"👤 اطلاعات حساب\n🆔 شناسه: {user_id}\n💳 موجودی کیف پول: {wallet:,} تومان\n📅 تاریخ انقضا: {exp}",
-            reply_markup=back_button())
+        send_account_info(message.chat.id, user_id)
     elif action == "wallet":
         with db() as conn:
             row = conn.execute("SELECT wallet FROM users WHERE user_id = ?", (user_id,)).fetchone()
@@ -762,18 +798,9 @@ def handle_callbacks(call):
         )
 
     elif data == "my_account":
-        with db() as conn:
-            row = conn.execute(
-                "SELECT wallet, expire_date FROM users WHERE user_id = ?", (user_id,)
-            ).fetchone()
-        wallet = row["wallet"] if row else 0
-        exp = row["expire_date"] if row and row["expire_date"] else "فعال نیست"
-        safe_edit(
-            call,
-            f"👤 اطلاعات حساب\n\n🆔 شناسه: `{user_id}`\n"
-            f"💳 موجودی کیف پول: {wallet:,} تومان\n📅 تاریخ انقضا: {exp}",
-            back_button(), parse_mode="Markdown",
-        )
+        # Edit callback message is kept simple; account details are sent as a new message with status link.
+        bot.answer_callback_query(call.id)
+        send_account_info(user_id, user_id)
 
     elif data == "loyalty":
         with db() as conn:
@@ -1037,12 +1064,35 @@ def handle_text_messages(message):
                     return
                 conn.execute("UPDATE orders SET config_sent=1, status='completed' WHERE id=?", (order_id,))
             try:
-                bot.send_message(order["user_id"], f"🎉 کانفیگ سفارش شما:\n\n`{config_text}`", parse_mode="Markdown")
-                bot.send_message(ADMIN_CHAT_ID, f"✅ کانفیگ سفارش {order_id} ارسال شد.")
+                bot.send_message(order["user_id"], f"🎉 کانفیگ اختصاصی سفارش شما:\n\n`{config_text}`", parse_mode="Markdown")
+                bot.send_message(ADMIN_CHAT_ID, f"✅ کانفیگ سفارش {order_id} ارسال شد.\nحالا لینک وضعیت سرویس (برای مشاهدهٔ حجم و تاریخ انقضا) را ارسال کنید. باید لینک https:// یا http:// باشد.")
+                admin_states[user_id] = f"sending_status_order_{order_id}"
             except Exception as exc:
                 with db() as conn:
                     conn.execute("UPDATE orders SET config_sent=0, status='paid' WHERE id=?", (order_id,))
                 bot.send_message(ADMIN_CHAT_ID, f"❌ ارسال ناموفق بود: {exc}")
+                admin_states.pop(user_id, None)
+            return
+
+        if state.startswith("sending_status_order_"):
+            order_id = int(state.rsplit("_", 1)[1])
+            status_link = text
+            if not (status_link.startswith("https://") or status_link.startswith("http://")):
+                bot.send_message(ADMIN_CHAT_ID, "لطفاً لینک معتبر که با https:// یا http:// شروع شود ارسال کنید.")
+                return
+            with db() as conn:
+                order = conn.execute("SELECT * FROM orders WHERE id=?", (order_id,)).fetchone()
+                if not order:
+                    bot.send_message(ADMIN_CHAT_ID, "سفارش پیدا نشد.")
+                    admin_states.pop(user_id, None)
+                    return
+                conn.execute("UPDATE orders SET status_link=? WHERE id=?", (status_link, order_id))
+            kb = InlineKeyboardMarkup().add(InlineKeyboardButton("📊 مشاهده حجم و تاریخ سرویس", url=status_link))
+            try:
+                bot.send_message(order["user_id"], "✅ لینک وضعیت سرویس شما ثبت شد.\n\nاز الان به بعد برای مشاهدهٔ حجم باقی‌مانده و تاریخ انقضا می‌توانید از بخش «حساب من» در مینی‌شاپ هم استفاده کنید.", reply_markup=kb)
+                bot.send_message(ADMIN_CHAT_ID, f"✅ لینک وضعیت سفارش {order_id} ثبت و برای مشتری ارسال شد.")
+            except Exception as exc:
+                bot.send_message(ADMIN_CHAT_ID, f"لینک ثبت شد، اما ارسال پیام به مشتری با خطا روبه‌رو شد: {exc}")
             admin_states.pop(user_id, None)
             return
 
