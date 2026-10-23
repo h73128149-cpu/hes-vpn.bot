@@ -19,7 +19,7 @@ from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo
 
 # ───────────────────────── تنظیمات ─────────────────────────
 
-TOKEN = "8844989420:AAH6DZcB-_-X9nQ7pKW5TVa5rPoZZm5rULA"
+TOKEN = "8844989420:AAF-ldyVZ1jApTv0_JpdOTb4XqEdiH9_erc"
 CARD_NUMBER = os.getenv("CARD_NUMBER", "6219861837027282")
 CARD_HOLDER = os.getenv("CARD_HOLDER", "عابدینی")
 ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID", "6889501272"))
