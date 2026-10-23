@@ -10,6 +10,7 @@
 import os
 import sqlite3
 import logging
+import json
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -17,7 +18,7 @@ from datetime import datetime, timedelta
 from contextlib import contextmanager
 
 import telebot
-from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo
+from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo, ReplyKeyboardMarkup, KeyboardButton
 
 # ───────────────────────── تنظیمات ─────────────────────────
 
@@ -27,18 +28,20 @@ from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo
 # │ 2) آیدی عددی تلگرام ادمین را داخل ADMIN_CHAT_ID قرار بده.    │
 # │ توکن واقعی را در فایل عمومی GitHub منتشر نکن.                │
 # └─────────────────────────────────────────────────────────────┘
-BOT_TOKEN = "8844989420:AAG-haNbneituCuHbZEiQ1LB1I_cRRv2yZw"
-ADMIN_CHAT_ID = 6889501272  # این عدد را با آیدی عددی خودت عوض کن
+# این مقادیر را در Render → Environment تنظیم کن؛ توکن را در GitHub ننویس.
+TOKEN = os.getenv("8844989420:AAG-haNbneituCuHbZEiQ1LB1I_cRRv2yZw", "").strip()
+try:
+    ADMIN_CHAT_ID = int(os.getenv("6889501272", "0").strip())
+except ValueError:
+    ADMIN_CHAT_ID = 0
+if not TOKEN:
+    raise RuntimeError("متغیر محیطی BOT_TOKEN در Render تنظیم نشده است.")
+if ADMIN_CHAT_ID <= 0:
+    raise RuntimeError("متغیر محیطی ADMIN_CHAT_ID باید آیدی عددی مدیر باشد.")
 
-TOKEN = BOT_TOKEN.strip()
-if not TOKEN or TOKEN == "توکن_ربات_را_اینجا_قرار_بده":
-    raise RuntimeError("ابتدا مقدار BOT_TOKEN را در ابتدای فایل bot.py وارد کن.")
-if not isinstance(ADMIN_CHAT_ID, int) or ADMIN_CHAT_ID == 123456789:
-    raise RuntimeError("ابتدا آیدی عددی ادمین را در مقدار ADMIN_CHAT_ID وارد کن.")
-
-CARD_NUMBER = os.getenv("CARD_NUMBER", "").strip()
-CARD_HOLDER = os.getenv("CARD_HOLDER", "مدیر فروشگاه").strip()
-WEB_APP_URL = os.getenv("WEB_APP_URL", "https://h73128149-cpu.github.io/mini-app/")
+CARD_NUMBER = os.getenv("6219861837027282", "").strip()
+CARD_HOLDER = os.getenv("عابدینی", "مدیر فروشگاه").strip()
+WEB_APP_URL = os.getenv("https://h73128149-cpu.github.io/Mini_vpn/", "https://h73128149-cpu.github.io/mini-app/")
 REQUIRED_CHANNEL = os.getenv("REQUIRED_CHANNEL", "@Hesvpnn")
 
 DEFAULT_CONFIG = os.getenv("DEFAULT_CONFIG", "")
@@ -48,7 +51,7 @@ DB_PATH = os.getenv("DB_PATH", "users.db")
 PLANS = {
     50000: {"name": "۱۰ گیگ (۱ ماهه)", "label": "۱۰ گیگ (۵۰ هزار تومان) - ۱ ماهه"},
     100000: {"name": "۲۰ گیگ (۱ ماهه)", "label": "۲۰ گیگ (۱۰۰ هزار تومان) - ۱ ماهه"},
-    300000: {"name": "۳۰ گیگ (۱ ماهه)", "label": "۳۰ گیگ (۳۰۰ هزار تومان) - ۱ ماهه"},
+    250000: {"name": "۳۰ گیگ (۱ ماهه)", "label": "۳۰ گیگ (۲۵۰ هزار تومان) - ۱ ماهه"},
     350000: {"name": "نامحدود (۱ ماهه)", "label": "نامحدود (۳۵۰ هزار تومان) - ۱ ماهه"},
 }
 
@@ -337,6 +340,12 @@ def send_membership_prompt(chat_id):
 # ───────────────────────── منوها ─────────────────────────
 
 def send_main_menu(chat_id, user_name, user_id):
+    # sendData در Telegram Web App به‌صورت مطمئن از دکمهٔ Web App در Reply Keyboard
+    # به ربات برمی‌گردد؛ به همین دلیل لانچر جداگانه و دائمی نمایش داده می‌شود.
+    webapp_keyboard = ReplyKeyboardMarkup(resize_keyboard=True, is_persistent=True)
+    webapp_keyboard.add(KeyboardButton("🚀 باز کردن فروشگاه HesVPN", web_app=WebAppInfo(url=WEB_APP_URL)))
+    bot.send_message(chat_id, "برای باز کردن فروشگاه گرافیکی، دکمهٔ زیر را بزنید:", reply_markup=webapp_keyboard)
+
     markup = InlineKeyboardMarkup(row_width=2)
     markup.add(
         InlineKeyboardButton("🚀 مینی‌اپ فروشگاه", web_app=WebAppInfo(url=WEB_APP_URL)),
@@ -413,6 +422,91 @@ def send_welcome(message):
     send_main_menu(
         message.chat.id, message.from_user.first_name or "کاربر", user_id
     )
+
+
+# ───────────────────── اتصال مینی‌اپ به ربات ─────────────────────
+
+@bot.message_handler(content_types=["web_app_data"])
+def handle_miniapp_data(message):
+    """دادهٔ معتبر مینی‌اپ را دریافت و به جریان‌های واقعی ربات وصل می‌کند."""
+    user_id = message.from_user.id
+    if not check_membership(user_id):
+        send_membership_prompt(message.chat.id)
+        return
+    ensure_user(message.from_user)
+    try:
+        payload = json.loads(message.web_app_data.data or "{}")
+    except (TypeError, ValueError, json.JSONDecodeError):
+        bot.send_message(message.chat.id, "❌ درخواست مینی‌اپ قابل خواندن نبود. دوباره تلاش کنید.")
+        return
+
+    action = payload.get("action")
+    if action == "buy_plan":
+        try:
+            price = int(payload.get("price"))
+        except (TypeError, ValueError):
+            bot.send_message(message.chat.id, "❌ قیمت پلن نامعتبر است.")
+            return
+        plan = PLANS.get(price)
+        if not plan:
+            bot.send_message(message.chat.id, "❌ این پلن در فروشگاه وجود ندارد.")
+            return
+        payable, coupon_code, percent = coupon_discount(user_id, price)
+        with db() as conn:
+            row = conn.execute("SELECT wallet FROM users WHERE user_id = ?", (user_id,)).fetchone()
+        wallet = int(row["wallet"]) if row else 0
+        discount_line = f"\n🎟️ تخفیف اعمال‌شده: {percent}٪" if coupon_code else ""
+        if wallet >= payable:
+            user_orders[user_id] = {"type": "wallet_purchase", "price": payable,
+                                    "original_price": price, "plan_name": plan["name"],
+                                    "coupon_code": coupon_code}
+            kb = InlineKeyboardMarkup(row_width=2)
+            kb.add(InlineKeyboardButton("✅ تأیید خرید با کیف پول", callback_data="confirm_buy"))
+            kb.add(InlineKeyboardButton("💳 پرداخت کارت‌به‌کارت", callback_data=f"card_{price}"))
+            kb.add(InlineKeyboardButton("🛒 انتخاب پلن دیگر", callback_data="shop"),
+                   InlineKeyboardButton("🏠 منوی اصلی", callback_data="home"))
+            bot.send_message(message.chat.id,
+                f"🛒 پلن انتخاب‌شده: {plan['name']}\n💰 مبلغ قابل پرداخت: {payable:,} تومان"
+                f"{discount_line}\n💳 موجودی کیف پول: {wallet:,} تومان\n\nروش پرداخت را انتخاب کنید:",
+                reply_markup=kb)
+        else:
+            kb = InlineKeyboardMarkup(row_width=2)
+            kb.add(InlineKeyboardButton("💳 کارت‌به‌کارت", callback_data=f"card_{price}"))
+            kb.add(InlineKeyboardButton("➕ شارژ کیف پول", callback_data="wallet"))
+            kb.add(InlineKeyboardButton("🛒 انتخاب پلن دیگر", callback_data="shop"),
+                   InlineKeyboardButton("🏠 منوی اصلی", callback_data="home"))
+            bot.send_message(message.chat.id,
+                f"🛒 پلن انتخاب‌شده: {plan['name']}\n💰 مبلغ قابل پرداخت: {payable:,} تومان"
+                f"{discount_line}\n💳 موجودی کیف پول: {wallet:,} تومان\n"
+                f"❌ کسری موجودی: {payable-wallet:,} تومان\n\nروش پرداخت را انتخاب کنید:",
+                reply_markup=kb)
+    elif action == "my_account":
+        with db() as conn:
+            row = conn.execute("SELECT wallet, expire_date FROM users WHERE user_id = ?", (user_id,)).fetchone()
+        wallet = int(row["wallet"]) if row else 0
+        exp = row["expire_date"] if row and row["expire_date"] else "فعال نیست"
+        bot.send_message(message.chat.id,
+            f"👤 اطلاعات حساب\n🆔 شناسه: {user_id}\n💳 موجودی کیف پول: {wallet:,} تومان\n📅 تاریخ انقضا: {exp}",
+            reply_markup=back_button())
+    elif action == "wallet":
+        with db() as conn:
+            row = conn.execute("SELECT wallet FROM users WHERE user_id = ?", (user_id,)).fetchone()
+        balance = int(row["wallet"]) if row else 0
+        user_orders[user_id] = {"type": "awaiting_charge_amount"}
+        bot.send_message(message.chat.id,
+            f"💳 موجودی کیف پول: {balance:,} تومان\n\nمبلغ شارژ را به تومان و با عدد انگلیسی ارسال کنید:",
+            reply_markup=back_button())
+    elif action == "support":
+        user_orders[user_id] = {"type": "awaiting_support_msg"}
+        bot.send_message(message.chat.id, "✉️ پیام یا مشکل خود را در یک پیام ارسال کنید:", reply_markup=back_button())
+    elif action == "shop":
+        kb = InlineKeyboardMarkup(row_width=2)
+        for price, plan in PLANS.items():
+            kb.add(InlineKeyboardButton(plan["label"], callback_data=f"p_{price}"))
+        kb.add(InlineKeyboardButton("🏠 منوی اصلی", callback_data="home"))
+        bot.send_message(message.chat.id, "🛒 پلن موردنظر را انتخاب کنید:", reply_markup=kb)
+    else:
+        bot.send_message(message.chat.id, "برای ادامه از دکمه‌های فروشگاه استفاده کنید یا /start را بزنید.")
 
 
 # ───────────────────────── پرداخت و سفارش ─────────────────────────
