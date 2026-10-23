@@ -12,6 +12,7 @@ import sqlite3
 import logging
 import threading
 import time
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from datetime import datetime, timedelta
 from contextlib import contextmanager
 
@@ -1068,10 +1069,36 @@ def handle_text_messages(message):
         return
 
 
+# ───────────────────── وب‌سرور سبک برای Render Web Service ─────────────────────
+
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path in ("/", "/health"):
+            body = b"HesVPN bot is running"
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        else:
+            self.send_error(404)
+
+    def log_message(self, format, *args):
+        logger.info("Web health check: " + format, *args)
+
+
+def run_health_server():
+    port = int(os.environ.get("PORT", "10000"))
+    server = HTTPServer(("0.0.0.0", port), HealthHandler)
+    logger.info("Health server listening on port %s", port)
+    server.serve_forever()
+
+
 # ───────────────────────── شروع ربات ─────────────────────────
 
 init_db()
 threading.Thread(target=expiry_notifier, daemon=True, name="expiry-notifier").start()
+threading.Thread(target=run_health_server, daemon=True, name="render-health-server").start()
 logger.info("Bot is running...")
 try:
     bot.infinity_polling(skip_pending=True, timeout=30, long_polling_timeout=30)
