@@ -26,7 +26,7 @@ from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo
 # │ 2) آیدی عددی تلگرام ادمین را داخل ADMIN_CHAT_ID قرار بده.    │
 # │ توکن واقعی را در فایل عمومی GitHub منتشر نکن.                │
 # └─────────────────────────────────────────────────────────────┘
-BOT_TOKEN = "8844989420:AAF-ldyVZ1jApTv0_JpdOTb4XqEdiH9_erc"
+BOT_TOKEN = "8844989420:AAG-haNbneituCuHbZEiQ1LB1I_cRRv2yZw"
 ADMIN_CHAT_ID = 6889501272  # این عدد را با آیدی عددی خودت عوض کن
 
 TOKEN = BOT_TOKEN.strip()
