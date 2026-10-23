@@ -2,6 +2,9 @@
 """
 ربات فروشگاهی تلگرام
 نیازمندی: pip install pyTelegramBotAPI
+اجرا:
+    export BOT_TOKEN="توکن جدید از BotFather"
+    python vv.py
 """
 
 import os
@@ -9,8 +12,6 @@ import sqlite3
 import logging
 import threading
 import time
-import http.server
-import socketserver
 from datetime import datetime, timedelta
 from contextlib import contextmanager
 
@@ -19,17 +20,29 @@ from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo
 
 # ───────────────────────── تنظیمات ─────────────────────────
 
-TOKEN = "8844989420:AAF-ldyVZ1jApTv0_JpdOTb4XqEdiH9_erc"
-CARD_NUMBER = os.getenv("CARD_NUMBER", "6219861837027282")
-CARD_HOLDER = os.getenv("CARD_HOLDER", "عابدینی")
-ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID", "6889501272"))
+# ┌─────────────────────────────────────────────────────────────┐
+# │ این دو مقدار را خودت پر کن:                                 │
+# │ 1) توکن ربات را از BotFather داخل BOT_TOKEN قرار بده.        │
+# │ 2) آیدی عددی تلگرام ادمین را داخل ADMIN_CHAT_ID قرار بده.    │
+# │ توکن واقعی را در فایل عمومی GitHub منتشر نکن.                │
+# └─────────────────────────────────────────────────────────────┘
+BOT_TOKEN = "8844989420:AAF-ldyVZ1jApTv0_JpdOTb4XqEdiH9_erc"
+ADMIN_CHAT_ID = 6889501272  # این عدد را با آیدی عددی خودت عوض کن
+
+TOKEN = BOT_TOKEN.strip()
+if not TOKEN or TOKEN == "توکن_ربات_را_اینجا_قرار_بده":
+    raise RuntimeError("ابتدا مقدار BOT_TOKEN را در ابتدای فایل bot.py وارد کن.")
+if not isinstance(ADMIN_CHAT_ID, int) or ADMIN_CHAT_ID == 123456789:
+    raise RuntimeError("ابتدا آیدی عددی ادمین را در مقدار ADMIN_CHAT_ID وارد کن.")
+
+CARD_NUMBER = os.getenv("CARD_NUMBER", "").strip()
+CARD_HOLDER = os.getenv("CARD_HOLDER", "مدیر فروشگاه").strip()
 WEB_APP_URL = os.getenv("WEB_APP_URL", "https://h73128149-cpu.github.io/mini-app/")
 REQUIRED_CHANNEL = os.getenv("REQUIRED_CHANNEL", "@Hesvpnn")
 
 DEFAULT_CONFIG = os.getenv("DEFAULT_CONFIG", "")
 TEST_CONFIG = os.getenv("TEST_CONFIG", "")
 DB_PATH = os.getenv("DB_PATH", "users.db")
-PORT = int(os.getenv("PORT", 8080))
 
 PLANS = {
     50000: {"name": "۱۰ گیگ (۱ ماهه)", "label": "۱۰ گیگ (۵۰ هزار تومان) - ۱ ماهه"},
@@ -45,29 +58,11 @@ logging.basicConfig(
 logger = logging.getLogger("telegram-shop")
 bot = telebot.TeleBot(TOKEN, parse_mode=None)
 
+# وضعیت‌های موقت؛ اطلاعات مهم پرداخت در SQLite نیز ثبت می‌شوند.
 user_orders = {}
 admin_states = {}
 active_coupons = {}
-
-
-# ───────────────────────── وب‌سرور برای سازگاری با Render ─────────────────────────
-
-class HealthCheckHandler(http.server.SimpleHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.send_header("Content-type", "text/plain")
-        self.end_headers()
-        self.wfile.write(b"Bot is running successfully!")
-    def log_message(self, format, *args):
-        pass  # جلوگیری از لاگ اضافی درخواست‌های پینگ رندر
-
-def run_web_server():
-    try:
-        with socketserver.TCPServer(("", PORT), HealthCheckHandler) as httpd:
-            logger.info(f"Health check server running on port {PORT}")
-            httpd.serve_forever()
-    except Exception as e:
-        logger.error(f"Web server error: {e}")
+last_notice_scan = 0
 
 
 # ───────────────────────── پایگاه داده ─────────────────────────
@@ -151,8 +146,9 @@ def init_db():
             user_id INTEGER NOT NULL, expire_date TEXT NOT NULL, notice_type TEXT NOT NULL,
             sent_at TEXT NOT NULL, PRIMARY KEY(user_id, expire_date, notice_type)
         )""")
+        # Migration for existing databases created by older versions.
         for table, column, definition in [
-            ('payments', 'coupon_code', 'TEXT'), ('orders', 'coupon_code', 'TEXT')
+            ('payments', 'coupon_code', 'TEXT'), ('orders', 'coupon_code', 'TEXT'), ('users', 'loyalty_points', 'INTEGER NOT NULL DEFAULT 0')
         ]:
             cols = [r['name'] for r in conn.execute(f'PRAGMA table_info({table})')]
             if column not in cols:
@@ -191,6 +187,7 @@ def consume_coupon(code):
 
 
 def reward_referrer(order_id, referred_user, amount):
+    """Pay referral commission once per order, in the same DB transaction."""
     reward = 0
     referrer_id = None
     with db() as conn:
@@ -208,11 +205,13 @@ def reward_referrer(order_id, referred_user, amount):
         if cur.rowcount != 1:
             return 0, referrer_id
         conn.execute("UPDATE users SET wallet=wallet+? WHERE user_id=?", (reward, referrer_id))
+    # Write audit only after the wallet transaction has committed (avoid nested DB lock).
     audit_event(referred_user, "referral_reward", f"order={order_id};referrer={referrer_id};amount={reward}")
     return reward, referrer_id
 
 
 def calculate_expiry(user_id, days=30):
+    """Extend an active subscription instead of shortening it on renewal."""
     now = datetime.now()
     with db() as conn:
         row = conn.execute("SELECT expire_date FROM users WHERE user_id=?", (user_id,)).fetchone()
@@ -227,6 +226,7 @@ def calculate_expiry(user_id, days=30):
 
 
 def expiry_notifier():
+    """Send each 24-hour and expiry notice at most once per subscription expiry."""
     while True:
         try:
             now = datetime.now()
@@ -306,6 +306,7 @@ def safe_edit(call, text, reply_markup=None, parse_mode=None):
 
 
 def back_button(callback="home"):
+    """دکمهٔ بازگشت و دسترسی مستقیم به منوی اصلی."""
     markup = InlineKeyboardMarkup(row_width=2)
     markup.add(
         InlineKeyboardButton("🔙 بازگشت", callback_data=callback),
@@ -332,7 +333,7 @@ def send_membership_prompt(chat_id):
     )
 
 
-# ───────────────────────── منوها و هندلرها ─────────────────────────
+# ───────────────────────── منوها ─────────────────────────
 
 def send_main_menu(chat_id, user_name, user_id):
     markup = InlineKeyboardMarkup(row_width=2)
@@ -352,6 +353,10 @@ def send_main_menu(chat_id, user_name, user_id):
         InlineKeyboardButton("📚 آموزش اتصال", callback_data="guide"),
         InlineKeyboardButton("📩 پشتیبانی و تیکت", callback_data="support"),
     )
+    markup.add(
+        InlineKeyboardButton("⭐ باشگاه مشتریان", callback_data="loyalty"),
+        InlineKeyboardButton("🧾 تاریخچه سفارش‌ها", callback_data="order_history"),
+    )
     if is_admin(user_id):
         markup.add(InlineKeyboardButton("⚙️ پنل مدیریت", callback_data="admin"))
 
@@ -370,6 +375,7 @@ def send_welcome(message):
         send_membership_prompt(message.chat.id)
         return
 
+    # ابتدا کاربر ثبت می‌شود؛ لینک معرفی فقط هنگام ثبت اولیه اعمال می‌شود.
     existed = False
     with db() as conn:
         existed = conn.execute(
@@ -405,6 +411,33 @@ def send_welcome(message):
 
     send_main_menu(
         message.chat.id, message.from_user.first_name or "کاربر", user_id
+    )
+
+
+# ───────────────────────── پرداخت و سفارش ─────────────────────────
+
+def create_order(user_id, amount, plan_name, paid_from_wallet=False):
+    with db() as conn:
+        cur = conn.execute("""
+            INSERT INTO orders
+                (user_id, amount, plan_name, status, created_at, paid_from_wallet)
+            VALUES (?, ?, ?, 'pending', ?, ?)
+        """, (user_id, amount, plan_name, now_text(), int(paid_from_wallet)))
+        return cur.lastrowid
+
+
+def notify_admin_order(order_id, user_id, amount, plan_name):
+    markup = InlineKeyboardMarkup()
+    markup.add(InlineKeyboardButton(
+        "📤 ارسال کانفیگ اختصاصی",
+        callback_data=f"send_order_{order_id}",
+    ))
+    bot.send_message(
+        ADMIN_CHAT_ID,
+        f"💰 سفارش جدید\nشماره سفارش: {order_id}\nکاربر: {user_id}\n"
+        f"پلن: {plan_name}\nمبلغ: {amount:,} تومان\n\n"
+        "پس از بررسی پرداخت، کانفیگ را ارسال کنید.",
+        reply_markup=markup,
     )
 
 
@@ -480,7 +513,9 @@ def confirm_wallet_purchase(call, user_id):
 
     price = int(order["price"])
     plan_name = order["plan_name"]
+    exp = calculate_expiry(user_id, 30)
     with db() as conn:
+        # تراکنش اتمیک مانع کسر دوبارهٔ موجودی در کلیک‌های هم‌زمان می‌شود.
         cur = conn.execute(
             "UPDATE users SET wallet = wallet - ? WHERE user_id = ? AND wallet >= ?",
             (price, user_id, price),
@@ -488,13 +523,14 @@ def confirm_wallet_purchase(call, user_id):
         if cur.rowcount != 1:
             bot.answer_callback_query(call.id, "موجودی کافی نیست.", show_alert=True)
             return
-        exp = calculate_expiry(user_id, 30)
         cur = conn.execute("""INSERT INTO orders
             (user_id, amount, plan_name, status, created_at, paid_from_wallet, coupon_code)
             VALUES (?, ?, ?, 'paid', ?, 1, ?)""",
             (user_id, price, plan_name, now_text(), order.get("coupon_code")))
         order_id = cur.lastrowid
         conn.execute("UPDATE users SET expire_date = ? WHERE user_id = ?", (exp, user_id))
+        earned_points = price // 10000
+        conn.execute("UPDATE users SET loyalty_points = loyalty_points + ? WHERE user_id = ?", (earned_points, user_id))
 
     commission, ref_id = reward_referrer(order_id, user_id, price)
     consume_coupon(order.get("coupon_code"))
@@ -508,25 +544,13 @@ def confirm_wallet_purchase(call, user_id):
     )
     if ref_id and commission:
         try:
-            bot.send_message(ref_id, f"🎉 مبلغ {commission:,} تومان پورسانت به کیف پول شما اضافه شد.")
+            bot.send_message(
+                ref_id,
+                f"🎉 مبلغ {commission:,} تومان پورسانت به کیف پول شما اضافه شد.",
+            )
         except Exception:
             pass
     notify_admin_order(order_id, user_id, price, plan_name)
-
-
-def notify_admin_order(order_id, user_id, amount, plan_name):
-    markup = InlineKeyboardMarkup()
-    markup.add(InlineKeyboardButton(
-        "📤 ارسال کانفیگ اختصاصی",
-        callback_data=f"send_order_{order_id}",
-    ))
-    bot.send_message(
-        ADMIN_CHAT_ID,
-        f"💰 سفارش جدید\nشماره سفارش: {order_id}\nکاربر: {user_id}\n"
-        f"پلن: {plan_name}\nمبلغ: {amount:,} تومان\n\n"
-        "پس از بررسی پرداخت، کانفیگ را ارسال کنید.",
-        reply_markup=markup,
-    )
 
 
 def create_payment_request(user_id, amount, kind, coupon_code=None):
@@ -559,6 +583,8 @@ def send_payment_to_admin(message, amount, kind, plan_name=None, coupon_code=Non
                          reply_markup=markup)
     bot.send_message(user_id, "✅ رسید شما برای ادمین ارسال شد؛ پس از بررسی نتیجه اعلام می‌شود.")
 
+
+# ───────────────────────── دکمه‌ها ─────────────────────────
 
 @bot.callback_query_handler(func=lambda call: True)
 def handle_callbacks(call):
@@ -654,6 +680,29 @@ def handle_callbacks(call):
             back_button(), parse_mode="Markdown",
         )
 
+    elif data == "loyalty":
+        with db() as conn:
+            row = conn.execute("SELECT loyalty_points FROM users WHERE user_id=?", (user_id,)).fetchone()
+        points = int(row["loyalty_points"] or 0) if row else 0
+        tier = "🥉 برنزی"
+        if points >= 1000:
+            tier = "🥇 طلایی"
+        elif points >= 300:
+            tier = "🥈 نقره‌ای"
+        kb = InlineKeyboardMarkup(row_width=2)
+        kb.add(InlineKeyboardButton("🛒 خرید امتیازآور", callback_data="shop"), InlineKeyboardButton("🧾 تاریخچه سفارش‌ها", callback_data="order_history"))
+        kb.add(InlineKeyboardButton("🔙 بازگشت", callback_data="home"), InlineKeyboardButton("🏠 منوی اصلی", callback_data="home"))
+        safe_edit(call, f"⭐ باشگاه مشتریان HesVPN\n\nامتیاز شما: {points} ⭐\nسطح شما: {tier}\n\nهر ۱۰٬۰۰۰ تومان خرید موفق = ۱ امتیاز.\nامتیازها برای سطح‌بندی وفاداری ثبت می‌شوند و خودکار به پول تبدیل نمی‌شوند.", kb)
+
+    elif data == "order_history":
+        with db() as conn:
+            rows = conn.execute("SELECT id,plan_name,amount,status,created_at FROM orders WHERE user_id=? ORDER BY id DESC LIMIT 10", (user_id,)).fetchall()
+        if not rows:
+            safe_edit(call, "🧾 هنوز سفارشی برای شما ثبت نشده است.", back_button("home"))
+        else:
+            lines = [f"#{r['id']} · {r['plan_name']} · {r['amount']:,} تومان\nوضعیت: {r['status']} · {r['created_at']}" for r in rows]
+            safe_edit(call, "🧾 تاریخچه ۱۰ سفارش اخیر\n\n" + "\n\n".join(lines), back_button("home"))
+
     elif data == "wallet":
         with db() as conn:
             row = conn.execute("SELECT wallet FROM users WHERE user_id = ?", (user_id,)).fetchone()
@@ -717,6 +766,8 @@ def handle_callbacks(call):
                    InlineKeyboardButton("🎟️ ساخت کد تخفیف", callback_data="admin_coupon"))
         markup.add(InlineKeyboardButton("🎫 تیکت‌های باز", callback_data="admin_tickets"),
                    InlineKeyboardButton("🧾 گزارش امنیتی", callback_data="admin_logs"))
+        markup.add(InlineKeyboardButton("📦 سفارش‌های در انتظار", callback_data="admin_orders"),
+                   InlineKeyboardButton("📈 گزارش فروش", callback_data="admin_sales"))
         markup.add(
             InlineKeyboardButton("🔙 بازگشت", callback_data="home"),
             InlineKeyboardButton("🏠 منوی اصلی", callback_data="home"),
@@ -751,6 +802,25 @@ def handle_callbacks(call):
             admin_states[user_id] = f"reply_ticket_{ticket_id}"
             bot.send_message(user_id, f"پاسخ خود را برای تیکت #{ticket_id} بفرستید:")
 
+    elif data == "admin_orders" and is_admin(user_id):
+        with db() as conn:
+            rows = conn.execute("SELECT id,user_id,plan_name,amount,status,created_at FROM orders WHERE status IN ('paid','pending') AND config_sent=0 ORDER BY id DESC LIMIT 15").fetchall()
+        if not rows:
+            bot.send_message(user_id, "✅ سفارشِ منتظر ارسال کانفیگ ندارید.", reply_markup=back_button("admin"))
+        else:
+            bot.send_message(user_id, "📦 سفارش‌های منتظر ارسال کانفیگ:")
+            for r in rows:
+                kb = InlineKeyboardMarkup().add(InlineKeyboardButton("📤 ارسال کانفیگ", callback_data=f"send_order_{r['id']}"))
+                bot.send_message(user_id, f"سفارش #{r['id']}\nکاربر: {r['user_id']}\nپلن: {r['plan_name']}\nمبلغ: {r['amount']:,} تومان\nوضعیت: {r['status']}", reply_markup=kb)
+
+    elif data == "admin_sales" and is_admin(user_id):
+        with db() as conn:
+            today = datetime.now().strftime("%Y-%m-%d")
+            day_total = conn.execute("SELECT COALESCE(SUM(amount),0) n FROM orders WHERE status IN ('paid','completed') AND substr(created_at,1,10)=?", (today,)).fetchone()["n"]
+            all_total = conn.execute("SELECT COALESCE(SUM(amount),0) n FROM orders WHERE status IN ('paid','completed')").fetchone()["n"]
+            count = conn.execute("SELECT COUNT(*) n FROM orders WHERE status IN ('paid','completed')").fetchone()["n"]
+        bot.send_message(user_id, f"📈 گزارش فروش\n\nامروز: {day_total:,} تومان\nکل فروش ثبت‌شده: {all_total:,} تومان\nتعداد سفارش‌های پرداخت‌شده: {count}", reply_markup=back_button("admin"))
+
     elif data == "admin_logs" and is_admin(user_id):
         with db() as conn:
             rows = conn.execute("SELECT actor_id,event,details,created_at FROM audit_log ORDER BY id DESC LIMIT 10").fetchall()
@@ -763,6 +833,9 @@ def handle_callbacks(call):
 
     elif data.startswith("payok_") and is_admin(user_id):
         payment_id = int(data.split("_", 1)[1])
+        with db() as read_conn:
+            payment_preview = read_conn.execute("SELECT * FROM payments WHERE id = ?", (payment_id,)).fetchone()
+        expiry_preview = calculate_expiry(payment_preview["user_id"], 30) if payment_preview and payment_preview["kind"] != "wallet" else None
         with db() as conn:
             payment = conn.execute("SELECT * FROM payments WHERE id = ?", (payment_id,)).fetchone()
             if not payment or payment["status"] != "pending":
@@ -787,8 +860,9 @@ def handle_callbacks(call):
                     VALUES (?, ?, ?, 'paid', ?, ?)""",
                     (payment["user_id"], payment["amount"], plan_name, now_text(), payment["coupon_code"]))
                 order_id = cur.lastrowid
-                exp = calculate_expiry(payment["user_id"], 30)
-                conn.execute("UPDATE users SET expire_date=? WHERE user_id=?", (exp, payment["user_id"]))
+                conn.execute("UPDATE users SET expire_date=? WHERE user_id=?", (expiry_preview, payment["user_id"]))
+                earned_points = int(payment["amount"]) // 10000
+                conn.execute("UPDATE users SET loyalty_points = loyalty_points + ? WHERE user_id=?", (earned_points, payment["user_id"]))
                 result_text = f"پرداخت تأیید شد. سفارش شمارهٔ {order_id} آمادهٔ ارسال کانفیگ است."
         if payment["kind"] != "wallet":
             commission, referrer_id = reward_referrer(order_id, payment["user_id"], payment["amount"])
@@ -839,6 +913,8 @@ def handle_callbacks(call):
     else:
         bot.answer_callback_query(call.id, "این گزینه شناخته نشد.", show_alert=False)
 
+
+# ───────────────────────── پیام‌های متنی و فیش ─────────────────────────
 
 @bot.message_handler(content_types=["text", "photo"])
 def handle_text_messages(message):
@@ -992,19 +1068,13 @@ def handle_text_messages(message):
         return
 
 
-# ───────────────────────── اجرای اصلی ربات ─────────────────────────
+# ───────────────────────── شروع ربات ─────────────────────────
 
-if __name__ == "__main__":
-    init_db()
-    # راه‌اندازی وب‌سرور داخلی برای پاسخ به پورت رندر
-    threading.Thread(target=run_web_server, daemon=True, name="health-server").start()
-    # راه‌اندازی ناظر انقضای اشتراک
-    threading.Thread(target=expiry_notifier, daemon=True, name="expiry-notifier").start()
-    
-    logger.info("Bot is running...")
-    while True:
-        try:
-            bot.infinity_polling(skip_pending=True, timeout=30, long_polling_timeout=30)
-        except Exception as e:
-            logger.error(f"Polling error: {e}")
-            time.sleep(5)
+init_db()
+threading.Thread(target=expiry_notifier, daemon=True, name="expiry-notifier").start()
+logger.info("Bot is running...")
+try:
+    bot.infinity_polling(skip_pending=True, timeout=30, long_polling_timeout=30)
+except Exception:
+    logger.exception("Polling stopped. Check that no other instance uses this bot token (Telegram error 409).")
+    raise
