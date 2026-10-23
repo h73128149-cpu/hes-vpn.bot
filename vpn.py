@@ -29,9 +29,9 @@ from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo
 # │ توکن واقعی را در فایل عمومی GitHub منتشر نکن.                │
 # └─────────────────────────────────────────────────────────────┘
 # این مقادیر را در Render → Environment تنظیم کن؛ توکن را در GitHub ننویس.
-TOKEN = os.getenv("8844989420:AAG-haNbneituCuHbZEiQ1LB1I_cRRv2yZw", "").strip()
+TOKEN = os.getenv("BOT_TOKEN", "").strip()
 try:
-    ADMIN_CHAT_ID = int(os.getenv("6889501272", "0").strip())
+    ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID", "0").strip())
 except ValueError:
     ADMIN_CHAT_ID = 0
 if not TOKEN:
@@ -39,9 +39,9 @@ if not TOKEN:
 if ADMIN_CHAT_ID <= 0:
     raise RuntimeError("متغیر محیطی ADMIN_CHAT_ID باید آیدی عددی مدیر باشد.")
 
-CARD_NUMBER = os.getenv("6219861837027282", "").strip()
-CARD_HOLDER = os.getenv("عابدینی", "مدیر فروشگاه").strip()
-WEB_APP_URL = os.getenv("https://h73128149-cpu.github.io/Mini_vpn/", "https://h73128149-cpu.github.io/mini-app/")
+CARD_NUMBER = os.getenv("CARD_NUMBER", "").strip()
+CARD_HOLDER = os.getenv("CARD_HOLDER", "مدیر فروشگاه").strip()
+WEB_APP_URL = os.getenv("WEB_APP_URL", "https://h73128149-cpu.github.io/Mini_vpn/").strip()
 REQUIRED_CHANNEL = os.getenv("REQUIRED_CHANNEL", "@Hesvpnn")
 
 DEFAULT_CONFIG = os.getenv("DEFAULT_CONFIG", "")
