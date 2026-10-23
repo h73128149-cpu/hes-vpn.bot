@@ -342,12 +342,9 @@ def send_membership_prompt(chat_id):
 # ───────────────────────── منوها ─────────────────────────
 
 def send_main_menu(chat_id, user_name, user_id):
-    # فروشگاه از دکمهٔ داخل پیام ربات باز می‌شود؛ کیبورد Web App دائمی حذف شده است.
+    # فروشگاه از دکمهٔ پایین/شیشه‌ای حذف شده است؛ خرید سریع تمام عرض را می‌گیرد.
     markup = InlineKeyboardMarkup(row_width=2)
-    markup.add(
-        InlineKeyboardButton("🛍️ فروشگاه آنلاین HesVPN", web_app=WebAppInfo(url=WEB_APP_URL)),
-        InlineKeyboardButton("🛒 خرید سریع", callback_data="shop"),
-    )
+    markup.add(InlineKeyboardButton("🛒 خرید سریع", callback_data="shop"))
     markup.add(
         InlineKeyboardButton("🎁 تست رایگان (۲۴س)", callback_data="free_test"),
         InlineKeyboardButton("👤 حساب / اشتراک من", callback_data="my_account"),
@@ -369,13 +366,15 @@ def send_main_menu(chat_id, user_name, user_id):
     bot.send_message(
         chat_id,
         f"سلام {user_name} عزیز 👋\nبه فروشگاه HesVPN خوش آمدید.\n"
-        "برای خرید، فروشگاه آنلاین را باز کنید؛ بعد از انتخاب پلن به همین ربات برمی‌گردید.",
+        "برای خرید روی «خرید سریع» بزنید یا از لینک فروشگاه آنلاین استفاده کنید؛ انتخاب پلن باید به همین ربات برگردد.",
         reply_markup=markup,
     )
-    # جایگزینی کیبورد دائمی فروشگاه با یک دکمهٔ ساده برای اجرای /start
+    # کیبورد قدیمی Web App (Shop) را حذف و فقط دکمهٔ /start را نگه دار.
+    from telebot.types import ReplyKeyboardRemove
+    bot.send_message(chat_id, " ", reply_markup=ReplyKeyboardRemove())
     start_kb = ReplyKeyboardMarkup(resize_keyboard=True, is_persistent=True)
     start_kb.add(KeyboardButton("/start"))
-    bot.send_message(chat_id, "برای باز کردن دوبارهٔ منوی ربات:", reply_markup=start_kb)
+    bot.send_message(chat_id, "برای باز کردن دوبارهٔ منوی ربات، /start را بزنید:", reply_markup=start_kb)
 
 
 def send_plan_checkout(chat_id, user_id, price):
@@ -720,6 +719,45 @@ def send_payment_to_admin(message, amount, kind, plan_name=None, coupon_code=Non
 
 
 # ───────────────────────── دکمه‌ها ─────────────────────────
+
+@bot.message_handler(content_types=["web_app_data"])
+def handle_web_app_data(message):
+    """Process shop actions sent by Telegram WebApp keyboard launch."""
+    user_id = message.from_user.id
+    if not check_membership(user_id):
+        send_membership_prompt(message.chat.id)
+        return
+    ensure_user(message.from_user)
+    try:
+        payload = json.loads(message.web_app_data.data or "{}")
+        action = str(payload.get("action", ""))
+        value = payload.get("value", "")
+    except (ValueError, TypeError, AttributeError):
+        # Compatibility with older mini-app versions that send a plain string.
+        raw = (message.web_app_data.data or "").strip()
+        action, value = (raw.split(":", 1) + [""])[:2] if ":" in raw else (raw, "")
+    if action in ("buy", "buy_plan"):
+        try:
+            price = int(value)
+        except (TypeError, ValueError):
+            price = 0
+        if price in PLANS:
+            send_plan_checkout(message.chat.id, user_id, price)
+        else:
+            bot.send_message(message.chat.id, "❌ پلن نامعتبر است؛ لطفاً دوباره انتخاب کنید.")
+    elif action in ("account", "my_account"):
+        send_account_info(message.chat.id, user_id)
+    elif action == "wallet":
+        with db() as conn:
+            row = conn.execute("SELECT wallet FROM users WHERE user_id=?", (user_id,)).fetchone()
+        user_orders[user_id] = {"type": "awaiting_charge_amount"}
+        bot.send_message(message.chat.id, f"💳 موجودی کیف پول: {int(row['wallet']) if row else 0:,} تومان\\n\\nمبلغ شارژ را با عدد انگلیسی ارسال کنید:", reply_markup=back_button())
+    elif action == "support":
+        user_orders[user_id] = {"type": "awaiting_support_msg"}
+        bot.send_message(message.chat.id, "✉️ پیام یا مشکل خود را در یک پیام ارسال کنید:", reply_markup=back_button())
+    else:
+        bot.send_message(message.chat.id, "برای ادامه، از منوی ربات گزینهٔ «خرید سریع» را بزنید.")
+
 
 @bot.callback_query_handler(func=lambda call: True)
 def handle_callbacks(call):
